@@ -1,20 +1,22 @@
-import requests
+  import requests
 import time
 import datetime
 import os
 
 # ---------------- CONFIG ----------------
-
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 INITIAL_CAPITAL = 20000
 capital = INITIAL_CAPITAL
 
-total_trades = 0
 wins = 0
 losses = 0
+total_trades = 0
 start_time = datetime.datetime.now()
+
+last_spot = None
+active_trade = None
 
 # ---------------- TELEGRAM ----------------
 def send(msg):
@@ -29,110 +31,137 @@ def send(msg):
 session = requests.Session()
 headers = {"User-Agent": "Mozilla/5.0"}
 
-def refresh_session():
+def fetch(symbol):
     try:
         session.get("https://www.nseindia.com", headers=headers)
-        time.sleep(2)
-        print("Session refreshed")
+        time.sleep(1)
+        url = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
+        res = session.get(url, headers=headers)
+        if res.status_code == 200:
+            return res.json()
     except:
-        print("Session error")
+        return None
 
 # ---------------- MARKET ----------------
 def market_open():
     now = datetime.datetime.now()
-
     if now.weekday() >= 5:
         return False
-
     if now.hour < 9 or now.hour > 15:
         return False
-
     if now.hour == 9 and now.minute < 15:
         return False
-
     if now.hour == 15 and now.minute > 30:
         return False
-
     return True
 
-# ---------------- FETCH ----------------
-def fetch(symbol):
-    url = "https://www.nseindia.com/api/option-chain-indices?symbol=" + symbol
+# ---------------- TREND ----------------
+def get_trend(current):
+    global last_spot
+    if last_spot is None:
+        last_spot = current
+        return "side"
 
-    for i in range(3):  # retry 3 times
-        try:
-            session.get("https://www.nseindia.com/option-chain", headers=headers)
-            time.sleep(1)
+    trend = "up" if current > last_spot else "down"
+    last_spot = current
+    return trend
 
-            res = session.get(url, headers=headers, timeout=5)
-
-            if res.status_code == 200:
-                return res.json()
-
-        except:
-            pass
-
-        print(f"{symbol} retry {i+1}")
-
-    return None
-
-# ---------------- TRADE FINDER ----------------
+# ---------------- HYBRID TRADE FINDER ----------------
 def find_trade(symbol, data):
     spot = data["records"]["underlyingValue"]
+    trend = get_trend(spot)
+
+    best = None
 
     for item in data["records"]["data"]:
+        strike = item["strikePrice"]
+
+        # Near ATM filter
+        if abs(strike - spot) > 100:
+            continue
+
         for opt in ["CE", "PE"]:
             if item.get(opt):
 
                 price = item[opt]["lastPrice"]
                 ath = item[opt]["highPrice"]
+                vol = item[opt].get("totalTradedVolume", 0)
 
-                if 2 <= price <= 20 and ath >= 10:
+                # -------- YOUR LEVELS --------
+                l1 = ath * 0.1
+                l2 = ath * 0.05
+                l3 = ath * 0.01
 
-                    l1 = round(ath * 0.1, 2)
+                near_l1 = abs(price - l1) < 2
+                near_l2 = abs(price - l2) < 1
+                near_l3 = abs(price - l3) < 0.5
 
-                    return {
+                near_level = near_l1 or near_l2 or near_l3
+
+                if not near_level:
+                    continue
+
+                # -------- SAFETY FILTERS --------
+                if vol < 100000:
+                    continue
+
+                if near_l3 and vol < 200000:
+                    continue
+
+                # -------- TREND FILTER --------
+                if trend == "up" and opt != "CE":
+                    continue
+                if trend == "down" and opt != "PE":
+                    continue
+
+                score = vol + (ath - price)
+
+                if best is None or score > best["score"]:
+                    best = {
                         "symbol": symbol,
                         "type": opt,
-                        "strike": item["strikePrice"],
-                        "price": price,
-                        "target": price * 2,
-                        "stop": l1
+                        "strike": strike,
+                        "entry": round(price, 2),
+                        "target": round(price * 2, 2),
+                        "stop": round(l2, 2),
+                        "level": "L1" if near_l1 else "L2" if near_l2 else "L3",
+                        "score": score
                     }
 
-    return None
+    return best
 
-# ---------------- SIMULATE RESULT ----------------
-def execute_trade(trade):
-    global total_trades, wins, losses, capital
+# ---------------- TRACK TRADE ----------------
+def track_trade(trade):
+    global active_trade, capital, wins, losses, total_trades
 
-    total_trades += 1
+    if active_trade is None:
+        active_trade = trade
+        send(f"✅ ENTRY ({trade['level']}) at ₹{trade['entry']}")
+        return
 
-    risk = 500  # fixed risk per trade
+    current = trade["entry"]
 
-    import random
-    win = random.choice([True, False])
-
-    if win:
-        profit = risk * 2
-        capital += profit
+    if current >= trade["target"]:
+        capital += 1000
         wins += 1
-        result = "WIN ✅"
-    else:
-        capital -= risk
-        losses += 1
-        result = "LOSS ❌"
+        total_trades += 1
+        send("🎯 TARGET HIT")
+        active_trade = None
 
-    return result, capital
+    elif current <= trade["stop"]:
+        capital -= 500
+        losses += 1
+        total_trades += 1
+        send("🛑 STOPLOSS HIT")
+        active_trade = None
 
 # ---------------- DASHBOARD ----------------
 def dashboard():
     duration = datetime.datetime.now() - start_time
-
-    winrate = (wins / total_trades * 100) if total_trades > 0 else 0
+    winrate = (wins / total_trades * 100) if total_trades else 0
 
     return f"""
-📊 DASHBOARD
+📊 FINAL DASHBOARD
 
 💰 Capital: ₹{capital}
 📈 Trades: {total_trades}
@@ -142,15 +171,11 @@ def dashboard():
 📊 Win Rate: {round(winrate,2)}%
 💸 P&L: ₹{capital - INITIAL_CAPITAL}
 
-⏱ Running: {str(duration).split('.')[0]}
+⏱ {str(duration).split('.')[0]}
 """
 
 # ---------------- MAIN ----------------
-print("🚀 BOT STARTED")
-send("✅ TEST MESSAGE FROM BOT")
-refresh_session()
-
-send("🤖 Bot started with ₹20,000 capital")
+send("🚀 FINAL HYBRID BOT STARTED")
 
 while True:
     try:
@@ -174,26 +199,21 @@ while True:
 
         if trade:
             msg = f"""
-🔥 TRADE
+🔥 TRADE ({trade['level']})
 
 {trade['symbol']} {trade['type']}
 Strike: {trade['strike']}
 
-Entry: ₹{trade['price']}
+Entry: ₹{trade['entry']}
 Target: ₹{trade['target']}
 Stop: ₹{trade['stop']}
 """
-
             send(msg)
-
-            result, cap = execute_trade(trade)
-
-            send(f"Result: {result}")
-
+            track_trade(trade)
             send(dashboard())
 
         else:
-            print("No trade")
+            print("No high quality trade")
 
         time.sleep(60)
 
