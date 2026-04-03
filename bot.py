@@ -5,8 +5,8 @@ import os
 
 # ---------------- CONFIG ----------------
 
-BOT_TOKEN = os.getenv("8693950578:AAF9BMa8KJfzADOweHNG8BncxjMgOTwM6NA")
-CHAT_ID = os.getenv("8039697310")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
 
 INITIAL_CAPITAL = 20000
 capital = INITIAL_CAPITAL
