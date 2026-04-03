@@ -6,7 +6,7 @@ import os
 # ---------------- CONFIG ----------------
 
 BOT_TOKEN = os.getenv("8693950578:AAF9BMa8KJfzADOweHNG8BncxjMgOTwM6NA")
-CHAT_ID = os.getenv("8039697310")
+CHAT_ID = os.getenv("948076738")
 
 INITIAL_CAPITAL = 20000
 capital = INITIAL_CAPITAL
@@ -147,7 +147,7 @@ def dashboard():
 
 # ---------------- MAIN ----------------
 print("🚀 BOT STARTED")
-
+send("✅ TEST MESSAGE FROM BOT")
 refresh_session()
 
 send("🤖 Bot started with ₹20,000 capital")
