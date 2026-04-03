@@ -1,9 +1,9 @@
 import requests
 import time
 import datetime
+import os
 
 # ---------------- CONFIG ----------------
- import os
 
 BOT_TOKEN = os.getenv("8693950578:AAF9BMa8KJfzADOweHNG8BncxjMgOTwM6NA")
 CHAT_ID = os.getenv("8039697310")
