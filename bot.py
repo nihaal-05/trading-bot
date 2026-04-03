@@ -3,8 +3,10 @@ import time
 import datetime
 
 # ---------------- CONFIG ----------------
-BOT_TOKEN = " 8693950578:AAF9BMa8KJfzADOweHNG8BncxjMgOTwM6NA"
-CHAT_ID = " 8039697310"
+ import os
+
+BOT_TOKEN = os.getenv("8693950578:AAF9BMa8KJfzADOweHNG8BncxjMgOTwM6NA")
+CHAT_ID = os.getenv("8039697310")
 
 INITIAL_CAPITAL = 20000
 capital = INITIAL_CAPITAL
