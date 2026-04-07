@@ -3,7 +3,6 @@ import time
 import datetime
 import os
 import pytz
-
 # ---------------- CONFIG ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
