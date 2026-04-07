@@ -3,6 +3,7 @@ import time
 import datetime
 import os
 import pytz
+
 # ---------------- CONFIG ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -16,14 +17,13 @@ total_trades = 0
 start_time = datetime.datetime.now()
 
 last_spot = None
-active_trade = None
 
 # ---------------- TELEGRAM ----------------
 def send(msg):
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
         requests.get(url, params={"chat_id": CHAT_ID, "text": msg})
-        print("📩 Sent:", msg)
+        print("📩", msg)
     except Exception as e:
         print("Telegram error:", e)
 
@@ -31,7 +31,6 @@ def send(msg):
 session = requests.Session()
 headers = {
     "User-Agent": "Mozilla/5.0",
-    "Accept-Language": "en-US,en;q=0.9",
     "Referer": "https://www.nseindia.com/"
 }
 
@@ -39,36 +38,27 @@ def fetch(symbol):
     try:
         session.get("https://www.nseindia.com", headers=headers)
         time.sleep(1)
-
         url = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
         res = session.get(url, headers=headers, timeout=5)
-
         if res.status_code == 200:
             return res.json()
-        else:
-            print(symbol, "HTTP:", res.status_code)
-
     except Exception as e:
-        print(symbol, "Fetch error:", e)
-
+        print(symbol, "fetch error:", e)
     return None
 
-# ---------------- MARKET (IST FIXED) ----------------
+# ---------------- MARKET (IST) ----------------
 def market_open():
     india = pytz.timezone("Asia/Kolkata")
     now = datetime.datetime.now(india)
 
-    print("🕒 IST TIME:", now.strftime("%H:%M:%S"))
+    print("🕒 IST:", now.strftime("%H:%M:%S"))
 
     if now.weekday() >= 5:
         return False
-
     if now.hour < 9 or now.hour > 15:
         return False
-
     if now.hour == 9 and now.minute < 15:
         return False
-
     if now.hour == 15 and now.minute > 30:
         return False
 
@@ -77,7 +67,6 @@ def market_open():
 # ---------------- TREND ----------------
 def get_trend(current):
     global last_spot
-
     if last_spot is None:
         last_spot = current
         return "side"
@@ -86,94 +75,80 @@ def get_trend(current):
     last_spot = current
     return trend
 
-# ---------------- TRADE FINDER ----------------
-def find_trade(symbol, data):
+# ---------------- SMART FINDER ----------------
+def find_trades(symbol, data):
     try:
         spot = data["records"]["underlyingValue"]
         trend = get_trend(spot)
 
-        best = None
+        trades = []
+        near_miss = []
 
         for item in data["records"]["data"]:
             strike = item["strikePrice"]
 
-            if abs(strike - spot) > 100:
+            if abs(strike - spot) > 200:
                 continue
 
             for opt in ["CE", "PE"]:
-                if item.get(opt):
+                if not item.get(opt):
+                    continue
 
-                    price = item[opt]["lastPrice"]
-                    ath = item[opt]["highPrice"]
-                    vol = item[opt].get("totalTradedVolume", 0)
+                price = item[opt]["lastPrice"]
+                ath = item[opt]["highPrice"]
+                vol = item[opt].get("totalTradedVolume", 0)
 
-                    l1 = ath * 0.1
-                    l2 = ath * 0.05
-                    l3 = ath * 0.01
+                if price == 0 or ath == 0:
+                    continue
 
-                    near_l1 = abs(price - l1) < 2
-                    near_l2 = abs(price - l2) < 1
-                    near_l3 = abs(price - l3) < 0.5
+                l1 = ath * 0.1
+                l2 = ath * 0.05
+                l3 = ath * 0.01
 
-                    if not (near_l1 or near_l2 or near_l3):
-                        continue
+                near_l1 = abs(price - l1) < 5
+                near_l2 = abs(price - l2) < 3
+                near_l3 = abs(price - l3) < 1
 
-                    if vol < 100000:
-                        continue
+                near_level = near_l1 or near_l2 or near_l3
 
-                    if near_l3 and vol < 200000:
-                        continue
+                if not near_level:
+                    near_miss.append(f"{strike}{opt} ❌ level miss")
+                    continue
 
-                    if trend == "up" and opt != "CE":
-                        continue
+                if vol < 30000:
+                    near_miss.append(f"{strike}{opt} ❌ low vol")
+                    continue
 
-                    if trend == "down" and opt != "PE":
-                        continue
+                if near_l3 and vol < 100000:
+                    continue
 
-                    score = vol + (ath - price)
+                if trend == "up" and opt != "CE":
+                    continue
+                if trend == "down" and opt != "PE":
+                    continue
 
-                    if best is None or score > best["score"]:
-                        best = {
-                            "symbol": symbol,
-                            "type": opt,
-                            "strike": strike,
-                            "entry": round(price, 2),
-                            "target": round(price * 2, 2),
-                            "stop": round(l2, 2),
-                            "level": "L1" if near_l1 else "L2" if near_l2 else "L3",
-                            "score": score
-                        }
+                score = vol + (ath - price)
 
-        return best
+                trade = {
+                    "symbol": symbol,
+                    "type": opt,
+                    "strike": strike,
+                    "entry": round(price, 2),
+                    "target": round(price * 2, 2),
+                    "stop": round(l2, 2),
+                    "level": "L1" if near_l1 else "L2" if near_l2 else "L3",
+                    "score": int(score)
+                }
+
+                trades.append(trade)
+
+        trades = sorted(trades, key=lambda x: x["score"], reverse=True)
+
+        return trades[:3], near_miss[:5]
 
     except Exception as e:
-        print("Trade error:", e)
-        return None
-
-# ---------------- TRACK TRADE ----------------
-def track_trade(trade):
-    global active_trade, capital, wins, losses, total_trades
-
-    if active_trade is None:
-        active_trade = trade
-        send(f"✅ ENTRY ({trade['level']}) at ₹{trade['entry']}")
-        return
-
-    current = trade["entry"]
-
-    if current >= trade["target"]:
-        capital += 1000
-        wins += 1
-        total_trades += 1
-        send("🎯 TARGET HIT")
-        active_trade = None
-
-    elif current <= trade["stop"]:
-        capital -= 500
-        losses += 1
-        total_trades += 1
-        send("🛑 STOPLOSS HIT")
-        active_trade = None
+        print("Find error:", e)
+        return [], []
 
 # ---------------- DASHBOARD ----------------
 def dashboard():
@@ -185,17 +160,12 @@ def dashboard():
 
 💰 Capital: ₹{capital}
 📈 Trades: {total_trades}
-✅ Wins: {wins}
-❌ Losses: {losses}
-
 📊 Win Rate: {round(winrate,2)}%
-💸 P&L: ₹{capital - INITIAL_CAPITAL}
-
 ⏱ {str(duration).split('.')[0]}
 """
 
 # ---------------- START ----------------
-send("🚀 BOT STARTED (IST FIXED & STABLE)")
+send("🚀 SMART BOT STARTED")
 
 # ---------------- MAIN LOOP ----------------
 while True:
@@ -205,38 +175,46 @@ while True:
             time.sleep(300)
             continue
 
-        print("🔍 Scanning market...")
+        print("🔍 Scanning...")
 
         data_n = fetch("NIFTY")
         data_b = fetch("BANKNIFTY")
 
-        trade = None
+        all_trades = []
+        near_miss = []
 
         if data_n:
-            trade = find_trade("NIFTY", data_n)
+            t, nm = find_trades("NIFTY", data_n)
+            all_trades += t
+            near_miss += nm
 
-        if not trade and data_b:
-            trade = find_trade("BANKNIFTY", data_b)
+        if data_b:
+            t, nm = find_trades("BANKNIFTY", data_b)
+            all_trades += t
+            near_miss += nm
 
-        if trade:
-            msg = f"""
-🔥 TRADE ({trade['level']})
-
-{trade['symbol']} {trade['type']}
-Strike: {trade['strike']}
-
-Entry: ₹{trade['entry']}
-Target: ₹{trade['target']}
-Stop: ₹{trade['stop']}
+        if all_trades:
+            msg = "🔥 TOP TRADES\n\n"
+            for t in all_trades[:3]:
+                msg += f"""
+{t['symbol']} {t['type']} {t['strike']}
+Level: {t['level']}
+Entry: ₹{t['entry']}
+Target: ₹{t['target']}
+Stop: ₹{t['stop']}
+Score: {t['score']}
+--------------------
 """
             send(msg)
-            track_trade(trade)
-            send(dashboard())
         else:
-            print("⚠️ No trade found")
+            msg = "⚠️ No trades\n\nNear Miss:\n"
+            msg += "\n".join(near_miss[:5])
+            send(msg)
+
+        send(dashboard())
 
         time.sleep(60)
 
     except Exception as e:
-        print("🔥 ERROR:", e)
+        print("ERROR:", e)
         time.sleep(10)
