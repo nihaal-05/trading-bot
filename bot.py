@@ -17,6 +17,7 @@ total_trades = 0
 start_time = datetime.datetime.now()
 
 last_spot = None
+last_dashboard_time = 0  # NEW
 
 # ---------------- TELEGRAM ----------------
 def send(msg):
@@ -75,7 +76,7 @@ def get_trend(current):
     last_spot = current
     return trend
 
-# ---------------- SMART FINDER ----------------
+# ---------------- FIND TRADES ----------------
 def find_trades(symbol, data):
     try:
         spot = data["records"]["underlyingValue"]
@@ -109,17 +110,12 @@ def find_trades(symbol, data):
                 near_l2 = abs(price - l2) < 3
                 near_l3 = abs(price - l3) < 1
 
-                near_level = near_l1 or near_l2 or near_l3
-
-                if not near_level:
-                    near_miss.append(f"{strike}{opt} ❌ level miss")
+                if not (near_l1 or near_l2 or near_l3):
+                    near_miss.append(f"{strike}{opt} ❌ level")
                     continue
 
                 if vol < 30000:
-                    near_miss.append(f"{strike}{opt} ❌ low vol")
-                    continue
-
-                if near_l3 and vol < 100000:
+                    near_miss.append(f"{strike}{opt} ❌ vol")
                     continue
 
                 if trend == "up" and opt != "CE":
@@ -129,7 +125,7 @@ def find_trades(symbol, data):
 
                 score = vol + (ath - price)
 
-                trade = {
+                trades.append({
                     "symbol": symbol,
                     "type": opt,
                     "strike": strike,
@@ -138,9 +134,7 @@ def find_trades(symbol, data):
                     "stop": round(l2, 2),
                     "level": "L1" if near_l1 else "L2" if near_l2 else "L3",
                     "score": int(score)
-                }
-
-                trades.append(trade)
+                })
 
         trades = sorted(trades, key=lambda x: x["score"], reverse=True)
 
@@ -161,11 +155,12 @@ def dashboard():
 💰 Capital: ₹{capital}
 📈 Trades: {total_trades}
 📊 Win Rate: {round(winrate,2)}%
+
 ⏱ {str(duration).split('.')[0]}
 """
 
 # ---------------- START ----------------
-send("🚀 SMART BOT STARTED")
+send("🚀 BOT STARTED (CLEAN VERSION)")
 
 # ---------------- MAIN LOOP ----------------
 while True:
@@ -193,9 +188,10 @@ while True:
             all_trades += t
             near_miss += nm
 
+        # -------- SEND TRADES --------
         if all_trades:
             msg = "🔥 TOP TRADES\n\n"
-            for t in all_trades[:3]:
+            for t in all_trades:
                 msg += f"""
 {t['symbol']} {t['type']} {t['strike']}
 Level: {t['level']}
@@ -206,12 +202,15 @@ Score: {t['score']}
 --------------------
 """
             send(msg)
-        else:
-            msg = "⚠️ No trades\n\nNear Miss:\n"
-            msg += "\n".join(near_miss[:5])
-            send(msg)
 
-        send(dashboard())
+        else:
+            print("⚠️ No trades")
+
+        # -------- SMART DASHBOARD (30 MIN) --------
+        current_time = time.time()
+        if current_time - last_dashboard_time > 1800:
+            send(dashboard())
+            last_dashboard_time = current_time
 
         time.sleep(60)
 
