@@ -2,6 +2,7 @@ import requests
 import time
 import datetime
 import os
+import pytz
 
 # ---------------- CONFIG ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -23,41 +24,61 @@ def send(msg):
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
         requests.get(url, params={"chat_id": CHAT_ID, "text": msg})
-        print(msg)
-    except:
-        print("Telegram error")
+        print("📩 Sent:", msg)
+    except Exception as e:
+        print("Telegram error:", e)
 
 # ---------------- SESSION ----------------
 session = requests.Session()
-headers = {"User-Agent": "Mozilla/5.0"}
+headers = {
+    "User-Agent": "Mozilla/5.0",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.nseindia.com/"
+}
 
 def fetch(symbol):
     try:
         session.get("https://www.nseindia.com", headers=headers)
         time.sleep(1)
+
         url = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
-        res = session.get(url, headers=headers)
+        res = session.get(url, headers=headers, timeout=5)
+
         if res.status_code == 200:
             return res.json()
-    except:
-        return None
+        else:
+            print(symbol, "HTTP:", res.status_code)
 
-# ---------------- MARKET ----------------
+    except Exception as e:
+        print(symbol, "Fetch error:", e)
+
+    return None
+
+# ---------------- MARKET (IST FIXED) ----------------
 def market_open():
-    now = datetime.datetime.now()
+    india = pytz.timezone("Asia/Kolkata")
+    now = datetime.datetime.now(india)
+
+    print("🕒 IST TIME:", now.strftime("%H:%M:%S"))
+
     if now.weekday() >= 5:
         return False
+
     if now.hour < 9 or now.hour > 15:
         return False
+
     if now.hour == 9 and now.minute < 15:
         return False
+
     if now.hour == 15 and now.minute > 30:
         return False
+
     return True
 
 # ---------------- TREND ----------------
 def get_trend(current):
     global last_spot
+
     if last_spot is None:
         last_spot = current
         return "side"
@@ -66,69 +87,69 @@ def get_trend(current):
     last_spot = current
     return trend
 
-# ---------------- HYBRID TRADE FINDER ----------------
+# ---------------- TRADE FINDER ----------------
 def find_trade(symbol, data):
-    spot = data["records"]["underlyingValue"]
-    trend = get_trend(spot)
+    try:
+        spot = data["records"]["underlyingValue"]
+        trend = get_trend(spot)
 
-    best = None
+        best = None
 
-    for item in data["records"]["data"]:
-        strike = item["strikePrice"]
+        for item in data["records"]["data"]:
+            strike = item["strikePrice"]
 
-        # Near ATM filter
-        if abs(strike - spot) > 100:
-            continue
+            if abs(strike - spot) > 100:
+                continue
 
-        for opt in ["CE", "PE"]:
-            if item.get(opt):
+            for opt in ["CE", "PE"]:
+                if item.get(opt):
 
-                price = item[opt]["lastPrice"]
-                ath = item[opt]["highPrice"]
-                vol = item[opt].get("totalTradedVolume", 0)
+                    price = item[opt]["lastPrice"]
+                    ath = item[opt]["highPrice"]
+                    vol = item[opt].get("totalTradedVolume", 0)
 
-                # -------- YOUR LEVELS --------
-                l1 = ath * 0.1
-                l2 = ath * 0.05
-                l3 = ath * 0.01
+                    l1 = ath * 0.1
+                    l2 = ath * 0.05
+                    l3 = ath * 0.01
 
-                near_l1 = abs(price - l1) < 2
-                near_l2 = abs(price - l2) < 1
-                near_l3 = abs(price - l3) < 0.5
+                    near_l1 = abs(price - l1) < 2
+                    near_l2 = abs(price - l2) < 1
+                    near_l3 = abs(price - l3) < 0.5
 
-                near_level = near_l1 or near_l2 or near_l3
+                    if not (near_l1 or near_l2 or near_l3):
+                        continue
 
-                if not near_level:
-                    continue
+                    if vol < 100000:
+                        continue
 
-                # -------- SAFETY FILTERS --------
-                if vol < 100000:
-                    continue
+                    if near_l3 and vol < 200000:
+                        continue
 
-                if near_l3 and vol < 200000:
-                    continue
+                    if trend == "up" and opt != "CE":
+                        continue
 
-                # -------- TREND FILTER --------
-                if trend == "up" and opt != "CE":
-                    continue
-                if trend == "down" and opt != "PE":
-                    continue
+                    if trend == "down" and opt != "PE":
+                        continue
 
-                score = vol + (ath - price)
+                    score = vol + (ath - price)
 
-                if best is None or score > best["score"]:
-                    best = {
-                        "symbol": symbol,
-                        "type": opt,
-                        "strike": strike,
-                        "entry": round(price, 2),
-                        "target": round(price * 2, 2),
-                        "stop": round(l2, 2),
-                        "level": "L1" if near_l1 else "L2" if near_l2 else "L3",
-                        "score": score
-                    }
+                    if best is None or score > best["score"]:
+                        best = {
+                            "symbol": symbol,
+                            "type": opt,
+                            "strike": strike,
+                            "entry": round(price, 2),
+                            "target": round(price * 2, 2),
+                            "stop": round(l2, 2),
+                            "level": "L1" if near_l1 else "L2" if near_l2 else "L3",
+                            "score": score
+                        }
 
-    return best
+        return best
+
+    except Exception as e:
+        print("Trade error:", e)
+        return None
 
 # ---------------- TRACK TRADE ----------------
 def track_trade(trade):
@@ -161,7 +182,7 @@ def dashboard():
     winrate = (wins / total_trades * 100) if total_trades else 0
 
     return f"""
-📊 FINAL DASHBOARD
+📊 DASHBOARD
 
 💰 Capital: ₹{capital}
 📈 Trades: {total_trades}
@@ -174,17 +195,18 @@ def dashboard():
 ⏱ {str(duration).split('.')[0]}
 """
 
-# ---------------- MAIN ----------------
-send("🚀 FINAL HYBRID BOT STARTED")
+# ---------------- START ----------------
+send("🚀 BOT STARTED (IST FIXED & STABLE)")
 
+# ---------------- MAIN LOOP ----------------
 while True:
     try:
         if not market_open():
-            print("Market closed")
+            print("❌ Market Closed")
             time.sleep(300)
             continue
 
-        print("Scanning...")
+        print("🔍 Scanning market...")
 
         data_n = fetch("NIFTY")
         data_b = fetch("BANKNIFTY")
@@ -211,12 +233,11 @@ Stop: ₹{trade['stop']}
             send(msg)
             track_trade(trade)
             send(dashboard())
-
         else:
-            print("No high quality trade")
+            print("⚠️ No trade found")
 
         time.sleep(60)
 
     except Exception as e:
-        print("Error:", e)
+        print("🔥 ERROR:", e)
         time.sleep(10)
