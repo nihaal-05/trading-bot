@@ -3,6 +3,7 @@ import time
 import datetime
 import os
 import pytz
+from collections import deque
 
 # ---------------- CONFIG ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -16,8 +17,13 @@ losses = 0
 total_trades = 0
 start_time = datetime.datetime.now()
 
-last_spot = None
-last_dashboard_time = 0  # NEW
+last_dashboard_time = 0
+
+# FIX: separate trend tracking
+price_history = {
+    "NIFTY": deque(maxlen=3),
+    "BANKNIFTY": deque(maxlen=3)
+}
 
 # ---------------- TELEGRAM ----------------
 def send(msg):
@@ -38,7 +44,7 @@ headers = {
 def fetch(symbol):
     try:
         session.get("https://www.nseindia.com", headers=headers)
-        time.sleep(1)
+        time.sleep(0.7)
         url = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
         res = session.get(url, headers=headers, timeout=5)
         if res.status_code == 200:
@@ -47,7 +53,7 @@ def fetch(symbol):
         print(symbol, "fetch error:", e)
     return None
 
-# ---------------- MARKET (IST) ----------------
+# ---------------- MARKET ----------------
 def market_open():
     india = pytz.timezone("Asia/Kolkata")
     now = datetime.datetime.now(india)
@@ -65,22 +71,28 @@ def market_open():
 
     return True
 
-# ---------------- TREND ----------------
-def get_trend(current):
-    global last_spot
-    if last_spot is None:
-        last_spot = current
+# ---------------- TREND (FIXED) ----------------
+def get_trend(symbol, current):
+    history = price_history[symbol]
+    history.append(current)
+
+    if len(history) < 3:
         return "side"
 
-    trend = "up" if current > last_spot else "down"
-    last_spot = current
-    return trend
+    if history[-1] > history[0]:
+        return "up"
+    elif history[-1] < history[0]:
+        return "down"
+    else:
+        return "side"
 
 # ---------------- FIND TRADES ----------------
 def find_trades(symbol, data):
     try:
         spot = data["records"]["underlyingValue"]
-        trend = get_trend(spot)
+        trend = get_trend(symbol, spot)
+
+        print(f"{symbol} | Spot: {spot} | Trend: {trend}")
 
         trades = []
         near_miss = []
@@ -106,21 +118,25 @@ def find_trades(symbol, data):
                 l2 = ath * 0.05
                 l3 = ath * 0.01
 
-                near_l1 = abs(price - l1) < 5
-                near_l2 = abs(price - l2) < 3
-                near_l3 = abs(price - l3) < 1
+                # FIXED TOLERANCE (main issue)
+                near_l1 = abs(price - l1) < 12
+                near_l2 = abs(price - l2) < 8
+                near_l3 = abs(price - l3) < 3
 
                 if not (near_l1 or near_l2 or near_l3):
                     near_miss.append(f"{strike}{opt} ❌ level")
                     continue
 
-                if vol < 30000:
+                # FIXED VOLUME
+                if vol < 20000:
                     near_miss.append(f"{strike}{opt} ❌ vol")
                     continue
 
                 if trend == "up" and opt != "CE":
                     continue
                 if trend == "down" and opt != "PE":
+                    continue
+                if trend == "side":
                     continue
 
                 score = vol + (ath - price)
@@ -160,7 +176,7 @@ def dashboard():
 """
 
 # ---------------- START ----------------
-send("🚀 BOT STARTED (CLEAN VERSION)")
+send("🚀 BOT STARTED")
 
 # ---------------- MAIN LOOP ----------------
 while True:
@@ -188,12 +204,14 @@ while True:
             all_trades += t
             near_miss += nm
 
+        # LIMIT TOTAL TRADES
+        all_trades = sorted(all_trades, key=lambda x: x["score"], reverse=True)[:3]
+
         # -------- SEND TRADES --------
         if all_trades:
             msg = "🔥 TOP TRADES\n\n"
             for t in all_trades:
-                msg += f"""
-{t['symbol']} {t['type']} {t['strike']}
+                msg += f"""{t['symbol']} {t['type']} {t['strike']}
 Level: {t['level']}
 Entry: ₹{t['entry']}
 Target: ₹{t['target']}
@@ -202,11 +220,10 @@ Score: {t['score']}
 --------------------
 """
             send(msg)
-
         else:
             print("⚠️ No trades")
 
-        # -------- SMART DASHBOARD (30 MIN) --------
+        # -------- DASHBOARD --------
         current_time = time.time()
         if current_time - last_dashboard_time > 1800:
             send(dashboard())
